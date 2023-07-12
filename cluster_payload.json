@@ -1,0 +1,19 @@
+{
+    "aws": {
+        "access_key_id": "${AWS_ACCESS_KEY_ID}",
+        "account_id": "${AWS_ACCOUNT_ID}",
+        "secret_access_key": "${AWS_SECRET_ACCESS_KEY}"
+    },
+    "ccs": {
+        "enabled": true
+    },
+    "multi_az": true,
+    "name": "${CLUSTER_PREFIX}-$job",
+    "properties": {
+    	"fake_cluster": true
+    },
+    "region": {
+        "id": "${AWS_REGION}",
+        "ccs_only": true
+    }
+}
