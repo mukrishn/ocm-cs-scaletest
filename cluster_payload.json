@@ -8,12 +8,11 @@
         "enabled": true
     },
     "multi_az": true,
-    "name": "${CLUSTER_PREFIX}-$job",
+    "name": "${CLUSTER_NAME}",
     "properties": {
-    	"fake_cluster": true
+    	"fake_cluster": "true"
     },
     "region": {
-        "id": "${AWS_REGION}",
-        "ccs_only": true
+        "id": "${AWS_REGION}"
     }
 }
