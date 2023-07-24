@@ -53,9 +53,9 @@ _validate_quota(){
         fi
     elif [[ $1 == "churn" ]] ; then
         if [[ $a -eq $b ]] ; then
-            echo "GREEN: Consumed quota matches before and after churn"
+            echo "GREEN: Consumed quota $a matches before and after churn $b"
         else
-            echo "RED: Consumed quota does not match before and after churn"
+            echo "RED: Consumed quota $a does not match before and after churn $b"
         fi
     elif [[ $1 == "mcp" ]] ; then
         NODES=$(( (a-b)/$NUMBER_OF_CPU_OF_INSTANCE_TYPE ))
@@ -108,17 +108,31 @@ _delete_cluster(){
 
 _wait_for_delete(){
     ITR=0
-    while [ ${ITR} -le 100 ] ; do
-        CHECK=$(ocm list cluster | grep $1 | wc -l)
-        if [[ $CHECK -eq 0 ]]; then
-            _log "All $1 cluster got removed"
-            return 0
-        else
-            _log "Still uninstalling some clusters"
-            ITR=$((ITR+1))
-            sleep 60
-        fi
-    done
+    if [[ $1 == "cluster" ]]; then
+        while [ ${ITR} -le 100 ] ; do
+            CHECK=$(ocm list cluster | grep $2 | wc -l)
+            if [[ $CHECK -eq 0 ]]; then
+                _log "All $2 cluster got removed"
+                return 0
+            else
+                _log "Still uninstalling some clusters"
+                ITR=$((ITR+1))
+                sleep 60
+            fi
+        done
+    else
+        while [ ${ITR} -le 100 ] ; do
+            CHECK=$(rosa list machinepool -c $3 | grep churn | awk '{print $1}' | wc -l)
+            if [[ $CHECK -eq 0 ]]; then
+                _log "All extra machinepool got removed from $3"
+                return 0
+            else
+                _log "Still deleting some machinepools"
+                ITR=$((ITR+1))
+                sleep 60
+            fi
+        done    
+    fi
 }
 
 _churn_cluster(){
@@ -128,10 +142,10 @@ _churn_cluster(){
         _create_cluster $1 "churn$n"  # args are 1> number of cluster 2> cluster name prefix
         _delete_cluster $1 "churn$n" & # args are 1> number of cluster 2> cluster name prefix
     done
-    _wait_for_delete churn
+    _wait_for_delete cluster churn
     f_count=$(_check_ocm_quota cluster)
 
-    echo "Validate Creation.."
+    _log "Validate Creation.."
     _validate_quota churn $f_count $i_count
 }
 
@@ -162,40 +176,58 @@ _mcp_status(){
 _create_machinepool(){
     for mcp in $(seq 1 $1);
     do
-        _log "Create machinepool $2-$mcp in cluster ${CLUSTER_NAME}"
-        rosa create machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" --name $2-$mcp --instance-type ${WORKER_TYPE} --replicas ${NUMBER_OF_NODES_PER_MCP} --availability-zone $A_ZONE 
+        _log "Create machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
+        rosa create machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" --name $2-$mcp-mcp --instance-type ${WORKER_TYPE} --replicas ${NUMBER_OF_NODES_PER_MCP} --availability-zone $A_ZONE 
     done
     sleep 30
     for mcp in $(seq 1 $1);
     do
-        _log "Check machinpool $2-$mcp in cluster ${CLUSTER_NAME} status"
-        _mcp_status ${CLUSTER_NAME} $2-$mcp 
+        _log "Check machinpool $2-$mcp-mcp in cluster ${CLUSTER_NAME} status"
+        _mcp_status ${CLUSTER_NAME} $2-$mcp-mcp 
     done    
 }
 
 _delete_machinepool(){
     for mcp in $(seq 1 $1);
     do
-        _log "Delete machinepool $2-$mcp in cluster ${CLUSTER_NAME}"
-        rosa delete machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp -y
+        _log "Delete machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
+        rosa delete machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp -y
     done
 
     for mcp in $(seq 1 $1);
     do
-        _log "Check machinpool $2-$mcp in cluster ${CLUSTER_NAME} status"
-        _mcp_status ${CLUSTER_NAME} $2-$mcp 
+        _log "Check machinpool $2-$mcp-mcp in cluster ${CLUSTER_NAME} status"
+        _mcp_status ${CLUSTER_NAME} $2-$mcp-mcp
     done 
 
 }
 
 _scale_machinepool(){
-        echo "================================================================================="
-
+    for mcp in $(seq 1 $1);
+    do
+        _log "Scale up machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
+        rosa edit machinepool -c "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp  --replicas $((NUMBER_OF_NODES_PER_MCP+1))
+    done
+    for mcp in $(seq 1 $1);
+    do
+        _log "Check machinpool $2-$mcp-mcp in cluster ${CLUSTER_NAME} status"
+        _mcp_status ${CLUSTER_NAME} $2-$mcp-mcp 
+    done    
 }
 
 _churn_machinepool(){
-        echo "================================================================================="
+    i_count=$(_check_ocm_quota cpu)
+    for n in $(seq 1 3);
+    do
+        _create_machinepool $1 "churn$n"  # args are 1> number of mcp 2> mcp name prefix
+        _scale_machinepool $1 "churn$n"  # args are 1> number of mcp 2> mcp name prefix
+        _delete_machinepool $1 "churn$n" & # args are 1> number of mcp 2> mcp name prefix
+    done
+    _wait_for_delete machinepool churn ${BASE_CLUSTER}-1  # 3rd argument only for mcp cleanup
+    f_count=$(_check_ocm_quota cpu)
 
+    _log "Validate Creation.."
+    _validate_quota churn $f_count $i_count
 }
 
 _check_ocm_quota(){
@@ -267,7 +299,7 @@ case ${WORKLOAD} in
     i_count=$(_check_ocm_quota cluster)
     _create_cluster $ITERATIONS "job"  # args are 1> number of cluster 2> cluster name prefix
     f_count=$(_check_ocm_quota cluster)
-    echo "Validate Creation.."
+    _log "Validate Creation.."
     _validate_quota cluster $i_count $f_count $ITERATIONS
 
     _churn_cluster 25
@@ -275,7 +307,7 @@ case ${WORKLOAD} in
     i_count=$(_check_ocm_quota cluster)
     _delete_cluster $ITERATIONS "job"  # args are 1> number of cluster 2> cluster name prefix
     f_count=$(_check_ocm_quota cluster)
-    echo "Validate Creation.."
+    _log "Validate Creation.."
     _validate_quota cluster $f_count $i_count $ITERATIONS
 
   ;;
@@ -288,19 +320,22 @@ case ${WORKLOAD} in
         _kubeconfig $CLUSTER_NAME
         _get_cluster_info $CLUSTER_NAME 
         i_count=$(_check_ocm_quota cpu)
-        _create_machinepool $NUMBER_OF_MCP "mcp" # args are 1> number of mcp 2> mcp name prefix
+        _create_machinepool $NUMBER_OF_MCP "job" # args are 1> number of mcp 2> mcp name prefix
         f_count=$(_check_ocm_quota cpu)
         _validate_quota mcp $i_count $f_count $((NUMBER_OF_MCP*NUMBER_OF_NODES_PER_MCP))
 
+        _scale_machinepool $NUMBER_OF_MCP "job" # args are 1> number of mcp 2> mcp name prefix
+        f_count=$(_check_ocm_quota cpu)
+        TOTAL=$((NUMBER_OF_NODES_PER_MCP+1))
+        _validate_quota mcp $i_count $f_count $((NUMBER_OF_MCP*TOTAL))
+
         i_count=$(_check_ocm_quota cpu)
-        _delete_machinepool $NUMBER_OF_MCP "mcp" # args are 1> number of mcp 2> mcp name prefix
+        _delete_machinepool $NUMBER_OF_MCP "job" # args are 1> number of mcp 2> mcp name prefix
         f_count=$(_check_ocm_quota cpu)
         _validate_quota mcp $f_count $i_count $((NUMBER_OF_MCP*NUMBER_OF_NODES_PER_MCP))
-
     done
 
-    _scale_machinepool
-    _churn_machinepool
+    _churn_machinepool 25
   ;;
   *)
      _log "Unknown load ${WORKLOAD}, exiting"
