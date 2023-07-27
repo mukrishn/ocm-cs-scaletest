@@ -16,6 +16,10 @@ _kubeconfig(){
     ocm get /api/clusters_mgmt/v1/clusters/$(_cluster_id $1)/credentials | jq -r .kubeconfig > ./$1
 }
 
+_csv(){
+    echo $1 >> cs-report-${WORKLOAD}.csv
+}
+
 _check_cluster_status(){
     ITR=0
     _ID=$(_cluster_id "$1")
@@ -48,24 +52,30 @@ _validate_quota(){
     if [[ $1 == "cluster" ]] ; then
         if [[ $((a-b)) -eq $4 ]] ; then
             echo "GREEN: Consumed quota $((a-b)) matches total requested cluster $4 "
+            _csv "cluster,$4,$((a-b)),Pass" 
         else
             echo "RED: Consumed quota $((a-b)) does not match total requested cluster $4"
+            _csv "cluster,$4,$((a-b)),Fail" 
         fi
     elif [[ $1 == "churn" ]] ; then
         if [[ $a -eq $b ]] ; then
             echo "GREEN: Consumed quota $a matches before and after churn $b"
+            _csv "churn-$4,$a,$b,Pass" 
         else
             echo "RED: Consumed quota $a does not match before and after churn $b"
+            _csv "churn-$4,$a,$b,Fail" 
         fi
     elif [[ $1 == "mcp" ]] ; then
         NODES=$(( (a-b)/$NUMBER_OF_CPU_OF_INSTANCE_TYPE ))
         if [[ $NODES -eq $4 ]] ; then
             echo "GREEN: Consumed quota $NODES matches total requested MCP nodes $4 "
+            _csv "machinepool,$4,$NODES,Pass" 
         else
             echo "RED: Consumed quota $NODES does not match total requested MCP nodes $4"
+            _csv "machinepool,$4,$NODES,Fail" 
         fi        
     else
-        echo "="
+        echo "skipping validation"
     fi
     echo "==========================================================================="   
 }
@@ -77,8 +87,7 @@ _create_cluster(){
         export CLUSTER_NAME=$2-$job-fake
         _log "Creating ${CLUSTER_NAME}"
         envsubst < ./cluster_payload.json > cluster_payload_$job.json
-        ocm post /api/clusters_mgmt/v1/clusters --body cluster_payload_$job.json 2>&1 > /dev/null &
-        sleep 1
+        ocm post /api/clusters_mgmt/v1/clusters --body cluster_payload_$job.json 2>&1 > /dev/null 
     done
     # pause for a few sec before looking for status
     sleep 10
@@ -146,7 +155,7 @@ _churn_cluster(){
     f_count=$(_check_ocm_quota cluster)
 
     _log "Validate Creation.."
-    _validate_quota churn $f_count $i_count
+    _validate_quota churn $f_count $i_count cluster
 }
 
 _get_cluster_info(){
@@ -174,10 +183,16 @@ _mcp_status(){
 }
 
 _create_machinepool(){
+    if [[ $3 ]]; then
+        REPLICA=" --enable-autoscaling --min-replicas ${NUMBER_OF_NODES_PER_MCP} --max-replicas $((NUMBER_OF_NODES_PER_MCP+10)) "
+    else
+        REPLICA=" --replicas ${NUMBER_OF_NODES_PER_MCP} "
+    fi
+
     for mcp in $(seq 1 $1);
     do
         _log "Create machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
-        rosa create machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" --name $2-$mcp-mcp --instance-type ${WORKER_TYPE} --replicas ${NUMBER_OF_NODES_PER_MCP} --availability-zone $A_ZONE 
+        rosa create machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" --name $2-$mcp-mcp --instance-type ${WORKER_TYPE} ${REPLICA} --availability-zone $A_ZONE 2>&1 > /dev/null
     done
     sleep 30
     for mcp in $(seq 1 $1);
@@ -191,7 +206,7 @@ _delete_machinepool(){
     for mcp in $(seq 1 $1);
     do
         _log "Delete machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
-        rosa delete machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp -y
+        rosa delete machinepool --cluster "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp -y 2>&1 > /dev/null
     done
 
     for mcp in $(seq 1 $1);
@@ -206,7 +221,7 @@ _scale_machinepool(){
     for mcp in $(seq 1 $1);
     do
         _log "Scale up machinepool $2-$mcp-mcp in cluster ${CLUSTER_NAME}"
-        rosa edit machinepool -c "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp  --replicas $((NUMBER_OF_NODES_PER_MCP+1))
+        rosa edit machinepool -c "$(_cluster_id ${CLUSTER_NAME})" $2-$mcp-mcp  --replicas $((NUMBER_OF_NODES_PER_MCP+1)) 2>&1 > /dev/null
     done
     for mcp in $(seq 1 $1);
     do
@@ -227,7 +242,7 @@ _churn_machinepool(){
     f_count=$(_check_ocm_quota cpu)
 
     _log "Validate Creation.."
-    _validate_quota churn $f_count $i_count
+    _validate_quota churn $f_count $i_count machinepool
 }
 
 _check_ocm_quota(){
@@ -278,6 +293,8 @@ setup(){
 }
 
 export LOG_LEVEL=${LOG_LEVEL:-"debug"}
+
+echo "testcase,attempted,consumed,status" > cs-report.csv
 
 setup
 case ${WORKLOAD} in
@@ -332,7 +349,20 @@ case ${WORKLOAD} in
         i_count=$(_check_ocm_quota cpu)
         _delete_machinepool $NUMBER_OF_MCP "job" # args are 1> number of mcp 2> mcp name prefix
         f_count=$(_check_ocm_quota cpu)
-        _validate_quota mcp $f_count $i_count $((NUMBER_OF_MCP*NUMBER_OF_NODES_PER_MCP))
+        TOTAL=$((NUMBER_OF_NODES_PER_MCP+1))
+        _validate_quota mcp $f_count $i_count $((NUMBER_OF_MCP*TOTAL))
+
+        i_count=$(_check_ocm_quota cpu)
+        _create_machinepool $NUMBER_OF_MCP "autoscale" "autoscale" # args are 1> number of mcp 2> mcp name prefix
+        f_count=$(_check_ocm_quota cpu)
+        TOTAL=$((NUMBER_OF_NODES_PER_MCP+10))
+        _validate_quota mcp $i_count $f_count $((NUMBER_OF_MCP*TOTAL))
+
+        i_count=$(_check_ocm_quota cpu)
+        _delete_machinepool $NUMBER_OF_MCP "autoscale" # args are 1> number of mcp 2> mcp name prefix
+        f_count=$(_check_ocm_quota cpu)
+        TOTAL=$((NUMBER_OF_NODES_PER_MCP+10))
+        _validate_quota mcp $f_count $i_count $((NUMBER_OF_MCP*TOTAL))
     done
 
     _churn_machinepool 25
