@@ -253,22 +253,77 @@ _check_ocm_quota(){
     fi
 }
 
+_create_upgrade_profile(){
+    rosa upgrade cluster -c $1 --mode auto --schedule-date 2023-08-04 --schedule-time 23:30 --control-plane -y 2>&1 > /dev/null
+}
+
+_delete_upgrade_profile(){
+    rosa delete upgrade cluster -c $1 -y 2>&1 > /dev/null
+}
+
+_validate_tc(){
+    LIST_ALL=$(rosa list tuning-configs -c $1 -o json | jq -r '.[].name' | xargs)
+    TUNED_PROFILE_COUNT=$(oc --kubeconfig ./kubeconfig get tuned -n openshift-cluster-node-tuning-operator | grep -c ${LIST_ALL// /\\|})
+    echo "==========================================================================="
+    if [[  $(echo $LIST_ALL | wc -w) -eq $TUNED_PROFILE_COUNT  ]]; then
+        echo "GREEN: Created tuned config $TUNED_PROFILE_COUNT matches total tuning-config $(echo $LIST_ALL | wc -w)"
+        _csv "tuning-config,$(echo $LIST_ALL | wc -w),$TUNED_PROFILE_COUNT,Pass" 
+
+    else
+        echo "RED: Created tuned config $TUNED_PROFILE_COUNT does not match total tuning-config $(echo $LIST_ALL | wc -w)"
+        _csv "tuning-config,$(echo $LIST_ALL | wc -w),$TUNED_PROFILE_COUNT,Fail" 
+    fi
+    echo "==========================================================================="
+}
+
+_create_tuning_config(){
+    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    do
+        export SYSTEM_KEY=$key
+        export RATIO=50
+        envsubst < ./tuned_config.spec > tuned_config.json
+        _log "Create tuning configs $key"
+        rosa create tuning-configs --name=tuned${key//_/} --spec-path tuned_config.json -c $1 2>&1 > /dev/null
+        _log "Apply tuning-config on a machinepool"
+    done
+    LIST_ALL=$(rosa list tuning-configs -c $1 -o json | jq -r '.[].name' | xargs)
+    rosa update machinepool -c $1 workers-0 --tuning-configs ${LIST_ALL// /,}
+    _validate_tc $1
+}
+
+_update_tuning_config(){
+    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    do
+        export SYSTEM_KEY=$key
+        export RATIO=55
+        envsubst < ./tuned_config.spec > tuned_config.json
+        _log "Update tuning configs $key"
+        rosa update tuning-configs --name=tuned${key//_/} --spec-path tuned_config.json -c $1 2>&1 > /dev/null
+    done
+}
+
+_delete_tuning_config(){
+    rosa update machinepool -c $1 workers-0 --tuning-configs ""
+    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    do
+        _log "Delete tuning configs $key"
+        rosa delete tuning-configs --name=tuned${key//_/} -c $1 -y 2>&1 > /dev/null
+    done
+}
 
 setup(){
 
     _log "Install required CLIs"
-    check_cli=$(ocm version)
-    if [[ $? -ne 0 ]]; then
+    if [[ ! $(ocm version) ]]; then
         _log "Install OCM CLI"
         OCM_CLI_FORK="https://github.com/openshift-online/ocm-cli"
         git clone -q --depth=1 --single-branch --branch ${OCM_CLI_VERSION} ${OCM_CLI_FORK}
-        pushd ocm-cli
+        pushd ocm-cli || exit
         sudo PATH=$PATH:/usr/bin:/usr/local/go/bin make
         sudo mv ocm /usr/local/bin/
-        popd
+        popd || exit
     fi
-    check_cli=$(rosa version)   
-    if [[ $? -ne 0 ]]; then
+    if [[ ! $(rosa version) ]]; then
         _log "Install AWS CLI"
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
@@ -277,13 +332,13 @@ setup(){
         _log "Install ROSA CLI"
         ROSA_CLI_FORK=https://github.com/openshift/rosa
         git clone -q --depth=1 --single-branch --branch ${ROSA_CLI_VERSION} ${ROSA_CLI_FORK}
-        pushd rosa
+        pushd rosa || exit
         make
         sudo mv rosa /usr/local/bin/
         rosa download openshift-client
         tar xzvf openshift-client-linux.tar.gz
         mv oc kubectl /usr/local/bin/
-        popd
+        popd || exit
     fi
 
     echo "OCM perf test kick started.."
@@ -366,6 +421,33 @@ case ${WORKLOAD} in
     done
 
     _churn_machinepool 25
+  ;;
+
+  upgrade-policy)
+    
+    for cluster in $(seq 1 $NUMBER_OF_BASE_CLUSTER);
+    do
+        export CLUSTER_NAME=${BASE_CLUSTER}-$cluster
+        _log "Download kubeconfig"
+        _kubeconfig $CLUSTER_NAME
+        _get_cluster_info $CLUSTER_NAME 
+        _create_upgrade_profile $CLUSTER_NAME
+        _delete_upgrade_profile $CLUSTER_NAME
+    done
+  ;;
+
+  tuning-config)
+    
+    for cluster in $(seq 1 $NUMBER_OF_BASE_CLUSTER);
+    do
+        export CLUSTER_NAME=${BASE_CLUSTER}-$cluster
+        _log "Download kubeconfig"
+        _kubeconfig $CLUSTER_NAME
+        _get_cluster_info $CLUSTER_NAME 
+        _create_tuning_config $CLUSTER_NAME
+        _update_tuning_config $CLUSTER_NAME
+        _delete_tuning_config $CLUSTER_NAME
+    done
   ;;
   *)
      _log "Unknown load ${WORKLOAD}, exiting"
