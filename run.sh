@@ -17,7 +17,7 @@ _kubeconfig(){
 }
 
 _csv(){
-    echo $1 >> cs-report-${WORKLOAD}.csv
+    echo $1 >> cs-report.csv
 }
 
 _check_cluster_status(){
@@ -263,52 +263,59 @@ _delete_upgrade_profile(){
 
 _validate_tc(){
     LIST_ALL=$(rosa list tuning-configs -c $1 -o json | jq -r '.[].name' | xargs)
-    TUNED_PROFILE_COUNT=$(oc --kubeconfig ./kubeconfig get tuned -n openshift-cluster-node-tuning-operator | grep -c ${LIST_ALL// /\\|})
+    TUNED_PROFILE_COUNT=$(oc --kubeconfig ./$1 get tuned -n openshift-cluster-node-tuning-operator | grep ${LIST_ALL// /\\|} | wc -l) 
     echo "==========================================================================="
     if [[  $(echo $LIST_ALL | wc -w) -eq $TUNED_PROFILE_COUNT  ]]; then
-        echo "GREEN: Created tuned config $TUNED_PROFILE_COUNT matches total tuning-config $(echo $LIST_ALL | wc -w)"
+        echo "GREEN: Tuned profile $TUNED_PROFILE_COUNT matches total tuning-config $(echo $LIST_ALL | wc -w)"
         _csv "tuning-config,$(echo $LIST_ALL | wc -w),$TUNED_PROFILE_COUNT,Pass" 
 
     else
-        echo "RED: Created tuned config $TUNED_PROFILE_COUNT does not match total tuning-config $(echo $LIST_ALL | wc -w)"
+        echo "RED: Tuned profile $TUNED_PROFILE_COUNT does not match total tuning-config $(echo $LIST_ALL | wc -w)"
         _csv "tuning-config,$(echo $LIST_ALL | wc -w),$TUNED_PROFILE_COUNT,Fail" 
     fi
     echo "==========================================================================="
 }
 
 _create_tuning_config(){
-    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    for key in dirty_ratio dirty_background_ratio overcommit_ratio swappiness;
     do
         export SYSTEM_KEY=$key
         export RATIO=50
+        export TUNED_NAME=${key//_/}
         envsubst < ./tuned_config.spec > tuned_config.json
         _log "Create tuning configs $key"
         rosa create tuning-configs --name=tuned${key//_/} --spec-path tuned_config.json -c $1 2>&1 > /dev/null
         _log "Apply tuning-config on a machinepool"
     done
-    LIST_ALL=$(rosa list tuning-configs -c $1 -o json | jq -r '.[].name' | xargs)
-    rosa update machinepool -c $1 workers-0 --tuning-configs ${LIST_ALL// /,}
-    _validate_tc $1
+    _update_tuning_config $1
 }
 
 _update_tuning_config(){
-    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    for key in dirty_ratio dirty_background_ratio overcommit_ratio swappiness;
     do
         export SYSTEM_KEY=$key
         export RATIO=55
+        export TUNED_NAME=${key//_/}
         envsubst < ./tuned_config.spec > tuned_config.json
         _log "Update tuning configs $key"
-        rosa update tuning-configs --name=tuned${key//_/} --spec-path tuned_config.json -c $1 2>&1 > /dev/null
+        rosa update tuning-configs tuned${key//_/} --spec-path tuned_config.json -c $1 2>&1 > /dev/null
     done
+    LIST_ALL=$(rosa list tuning-configs -c $1 -o json | jq -r '.[].name' | xargs)
+    rosa update machinepool -c $1 workers-0 --tuning-configs ${LIST_ALL// /,}
+    sleep 5
+    _validate_tc $1
+    sleep 30
+    _delete_tuning_config $1       
 }
 
 _delete_tuning_config(){
     rosa update machinepool -c $1 workers-0 --tuning-configs ""
-    for key in vm.dirty_ratio vm.dirty_background_ratio vm.overcommit_ratio vm.swappiness;
+    for key in dirty_ratio dirty_background_ratio overcommit_ratio swappiness;
     do
         _log "Delete tuning configs $key"
-        rosa delete tuning-configs --name=tuned${key//_/} -c $1 -y 2>&1 > /dev/null
+        rosa delete tuning-configs tuned${key//_/} -c $1 -y 2>&1 > /dev/null
     done
+    _validate_tc $1    
 }
 
 setup(){
@@ -445,8 +452,6 @@ case ${WORKLOAD} in
         _kubeconfig $CLUSTER_NAME
         _get_cluster_info $CLUSTER_NAME 
         _create_tuning_config $CLUSTER_NAME
-        _update_tuning_config $CLUSTER_NAME
-        _delete_tuning_config $CLUSTER_NAME
     done
   ;;
   *)
