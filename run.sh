@@ -59,10 +59,10 @@ _validate_quota(){
         fi
     elif [[ $1 == "churn" ]] ; then
         if [[ $a -eq $b ]] ; then
-            echo "GREEN: Consumed quota $a matches before and after churn $b"
+            echo "GREEN: Consumed quota $a matches before and after churn $4 $b"
             _csv "churn-$4,$a,$b,Pass" 
         else
-            echo "RED: Consumed quota $a does not match before and after churn $b"
+            echo "RED: Consumed quota $a does not match before and after churn $4 $b"
             _csv "churn-$4,$a,$b,Fail" 
         fi
     elif [[ $1 == "mcp" ]] ; then
@@ -360,7 +360,7 @@ echo "testcase,attempted,consumed,status" > cs-report.csv
 
 setup
 case ${WORKLOAD} in
-  cluster)
+  cluster|all)
 
     _log "Clean-up existing OSD access keys.."
     AWS_KEY=$(aws iam list-access-keys --user-name OsdCcsAdmin --output text --query 'AccessKeyMetadata[*].AccessKeyId')
@@ -389,8 +389,8 @@ case ${WORKLOAD} in
     _log "Validate Creation.."
     _validate_quota cluster $f_count $i_count $ITERATIONS
 
-  ;;
-  machinepool)
+  ;;&
+  machinepool|all)
     
     for cluster in $(seq 1 $NUMBER_OF_BASE_CLUSTER);
     do
@@ -428,7 +428,7 @@ case ${WORKLOAD} in
     done
 
     _churn_machinepool 25
-  ;;
+  ;;&
 
   upgrade-policy)
     
@@ -441,9 +441,9 @@ case ${WORKLOAD} in
         _create_upgrade_profile $CLUSTER_NAME
         _delete_upgrade_profile $CLUSTER_NAME
     done
-  ;;
+  ;;&
 
-  tuning-config)
+  tuning-config|all)
     
     for cluster in $(seq 1 $NUMBER_OF_BASE_CLUSTER);
     do
@@ -453,10 +453,7 @@ case ${WORKLOAD} in
         _get_cluster_info $CLUSTER_NAME 
         _create_tuning_config $CLUSTER_NAME
     done
-  ;;
-  *)
-     _log "Unknown load ${WORKLOAD}, exiting"
-     exit 1
-  ;;
+  ;;&
+  *) ;;
 esac
 
